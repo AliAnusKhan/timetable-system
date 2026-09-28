@@ -4,6 +4,28 @@ import { useState, useEffect, useMemo } from 'react';
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const YEARS = ['1st Year', '2nd Year', '3rd Year'];
+
+// Shifts. `value` is what is stored in the database.
+const SHIFTS = [
+  { value: 'Morning', label: 'Morning shift', short: 'Morning', hours: '9:00 AM – 1:30 PM' },
+  { value: 'Afternoon', label: '2nd shift', short: '2nd shift', hours: '2:00 PM – 6:00 PM' },
+  { value: 'Evening', label: '3rd shift', short: '3rd shift', hours: '5:00 PM – 9:00 PM' },
+];
+const shiftInfo = (value) => SHIFTS.find((s) => s.value === (value || 'Morning')) || SHIFTS[0];
+const shiftIndex = (value) => Math.max(0, SHIFTS.findIndex((s) => s.value === (value || 'Morning')));
+
+// '09:00' or '9:00 AM' -> '9:00 AM'
+function fmtTime(t) {
+  if (!t) return '';
+  const m = String(t).trim().match(/^(\d{1,2})[:.](\d{2})\s*([AaPp][Mm])?$/);
+  if (!m) return t;
+  let h = parseInt(m[1], 10);
+  const mins = m[2];
+  if (m[3]) return `${h}:${mins} ${m[3].toUpperCase()}`;
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${mins} ${suffix}`;
+}
 // Common DAE technologies offered across Pakistani technical boards. This is a general
 // reference list, not a confirmed roster from your specific institute or board — add,
 // rename, or remove entries here to match what you actually offer.
@@ -114,6 +136,9 @@ export default function Home() {
   const [timeSlots, setTimeSlots] = useState([]);
   const [courses, setCourses] = useState([]);
   const [assignments, setAssignments] = useState([]);
+  const [absences, setAbsences] = useState([]);
+  const [shiftFilter, setShiftFilter] = useState('All');
+  const [absentForm, setAbsentForm] = useState({ teacher_id: '', day: DAYS[0] });
 
   // Form inputs
   const [newTeacherName, setNewTeacherName] = useState('');
@@ -122,8 +147,8 @@ export default function Home() {
   const [newTeacherCourseId, setNewTeacherCourseId] = useState('');
   const [newTeacherDouble, setNewTeacherDouble] = useState(false);
 
-  const [newClass, setNewClass] = useState({ class_name: '', section: '', customSection: '' });
-  const [newSlot, setNewSlot] = useState({ period_number: '', start_time: '', end_time: '', applies_on_friday: true });
+  const [newClass, setNewClass] = useState({ class_name: '', section: '', customSection: '', shift: 'Morning' });
+  const [newSlot, setNewSlot] = useState({ period_number: '', start_time: '', end_time: '', applies_on_friday: true, shift: 'Morning' });
   const [newCourse, setNewCourse] = useState({ year: '1st Year', technology: TECHNOLOGIES[0], name: '', course_type: 'Theory' });
   const [catalogTechFilter, setCatalogTechFilter] = useState('All');
   const [newAssignment, setNewAssignment] = useState({ teacher_id: '', class_id: '', sessions_per_week: 5 });
@@ -134,9 +159,9 @@ export default function Home() {
   const [editingCourseId, setEditingCourseId] = useState(null);
   const [editCourse, setEditCourse] = useState({ year: '1st Year', technology: TECHNOLOGIES[0], name: '', course_type: 'Theory' });
   const [editingClassId, setEditingClassId] = useState(null);
-  const [editClass, setEditClass] = useState({ class_name: '', section: '', customSection: '' });
+  const [editClass, setEditClass] = useState({ class_name: '', section: '', customSection: '', shift: 'Morning' });
   const [editingSlotId, setEditingSlotId] = useState(null);
-  const [editSlot, setEditSlot] = useState({ period_number: '', start_time: '', end_time: '', applies_on_friday: true });
+  const [editSlot, setEditSlot] = useState({ period_number: '', start_time: '', end_time: '', applies_on_friday: true, shift: 'Morning' });
 
   const loadAllData = async () => {
     try {
@@ -152,6 +177,7 @@ export default function Home() {
         setTimeSlots(adminData.time_slots || []);
         setCourses(adminData.courses || []);
         setAssignments(adminData.assignments || []);
+        setAbsences(adminData.absences || []);
       }
     } catch (err) {
       console.error('Error loading data:', err);
@@ -192,11 +218,37 @@ export default function Home() {
     [courses, newTeacherCourseId]
   );
 
+  const sortedSlots = useMemo(
+    () =>
+      [...timeSlots].sort(
+        (a, b) => shiftIndex(a.shift) - shiftIndex(b.shift) || (a.period_number || 0) - (b.period_number || 0)
+      ),
+    [timeSlots]
+  );
+
+  const substitutionRows = useMemo(
+    () =>
+      timetable
+        .filter((e) => e.substitute)
+        .sort(
+          (a, b) =>
+            DAYS.indexOf(a.day) - DAYS.indexOf(b.day) ||
+            shiftIndex(a.time_slots?.shift) - shiftIndex(b.time_slots?.shift) ||
+            (a.time_slots?.period_number || 0) - (b.time_slots?.period_number || 0)
+        ),
+    [timetable]
+  );
+
+  const sortedAbsences = useMemo(
+    () => [...absences].sort((a, b) => DAYS.indexOf(a.day) - DAYS.indexOf(b.day)),
+    [absences]
+  );
+
   // --- REPORT DATA: teacher workload (bar) and course-type split (pie) ---
   const teacherWorkloadData = useMemo(() => {
     const counts = {};
     timetable.forEach((entry) => {
-      const name = entry.teachers?.name;
+      const name = (entry.substitute || entry.teachers)?.name;
       if (name) counts[name] = (counts[name] || 0) + 1;
     });
     return Object.entries(counts)
@@ -262,9 +314,9 @@ export default function Home() {
     await fetch('/api/add-class', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ class_name: newClass.class_name, section: resolvedSection }),
+      body: JSON.stringify({ class_name: newClass.class_name, section: resolvedSection, shift: newClass.shift }),
     });
-    setNewClass({ class_name: '', section: '', customSection: '' });
+    setNewClass({ class_name: '', section: '', customSection: '', shift: newClass.shift });
     loadAllData();
   };
 
@@ -274,7 +326,7 @@ export default function Home() {
     await fetch(`/api/update-class/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ class_name: editClass.class_name, section: resolvedSection }),
+      body: JSON.stringify({ class_name: editClass.class_name, section: resolvedSection, shift: editClass.shift }),
     });
     setEditingClassId(null);
     loadAllData();
@@ -297,9 +349,10 @@ export default function Home() {
         start_time: newSlot.start_time,
         end_time: newSlot.end_time,
         applies_on_friday: newSlot.applies_on_friday,
+        shift: newSlot.shift,
       }),
     });
-    setNewSlot({ period_number: '', start_time: '', end_time: '', applies_on_friday: true });
+    setNewSlot({ period_number: '', start_time: '', end_time: '', applies_on_friday: true, shift: newSlot.shift });
     loadAllData();
   };
 
@@ -313,6 +366,7 @@ export default function Home() {
         start_time: editSlot.start_time,
         end_time: editSlot.end_time,
         applies_on_friday: editSlot.applies_on_friday,
+        shift: editSlot.shift,
       }),
     });
     setEditingSlotId(null);
@@ -375,12 +429,60 @@ export default function Home() {
     loadAllData();
   };
 
+  // --- SHIFT SETUP ---
+  const handleSetupShifts = async () => {
+    try {
+      const res = await fetch('/api/setup-default-shifts', { method: 'POST' });
+      const data = await res.json();
+      setMessage(res.ok && data.success ? data.message : data.detail || 'Could not load shift timings.');
+    } catch (err) {
+      setMessage('Server error. Please make sure the FastAPI server is running.');
+    }
+    loadAllData();
+  };
+
+  // --- ABSENCE ACTIONS ---
+  const handleMarkAbsent = async (e) => {
+    e.preventDefault();
+    if (!absentForm.teacher_id) return;
+    const days = absentForm.day === 'Whole week' ? DAYS : [absentForm.day];
+    try {
+      const res = await fetch('/api/mark-absent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teacher_id: parseInt(absentForm.teacher_id), days }),
+      });
+      const data = await res.json();
+      setMessage(res.ok && data.success ? data.message : data.detail || 'Could not mark the teacher absent.');
+    } catch (err) {
+      setMessage('Server error. Please make sure the FastAPI server is running.');
+    }
+    setAbsentForm({ ...absentForm, teacher_id: '' });
+    loadAllData();
+  };
+
+  const handleRemoveAbsence = async (id) => {
+    try {
+      const res = await fetch(`/api/remove-absence/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      setMessage(res.ok && data.success ? data.message : data.detail || 'Could not remove the absence.');
+    } catch (err) {
+      setMessage('Server error. Please make sure the FastAPI server is running.');
+    }
+    loadAllData();
+  };
+
   return (
     <div className="min-h-screen bg-[#12181C] text-[#ECE8DE] font-[Inter,sans-serif]">
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
         .font-display { font-family: 'Source Serif 4', Georgia, serif; }
         .font-ui { font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+        /* Stop the page jiggling when the mouse moves over it: reserve room for the scrollbar
+           so it appearing/disappearing never changes the layout width. */
+        html { overflow-y: scroll; scrollbar-gutter: stable; }
+        body { overflow-x: hidden; }
+        .scroll-stable { scrollbar-gutter: stable; overscroll-behavior: contain; }
       `}</style>
 
       <div className="max-w-7xl mx-auto px-4 md:px-8 py-8 space-y-8 font-ui">
@@ -410,6 +512,7 @@ export default function Home() {
           {[
             { id: 'grid', label: 'Weekly timetable' },
             { id: 'admin', label: 'Teachers, classes & courses' },
+            { id: 'absence', label: `Absences & substitutes${absences.length ? ` (${absences.length})` : ''}` },
             { id: 'reports', label: 'Reports' },
           ].map((tab) => (
             <button
@@ -444,12 +547,34 @@ export default function Home() {
               </div>
             )}
 
+            {/* SHIFT FILTER */}
+            <div className="flex flex-wrap items-center gap-2">
+              {[{ value: 'All', label: 'All shifts', hours: '' }, ...SHIFTS].map((s) => (
+                <button
+                  key={s.value}
+                  onClick={() => setShiftFilter(s.value)}
+                  className={`px-3 py-1.5 rounded-md text-xs border ${
+                    shiftFilter === s.value
+                      ? 'bg-[#C9A24B] text-[#12181C] border-[#C9A24B] font-semibold'
+                      : 'bg-[#181F24] text-[#92999E] border-[#2A343B]'
+                  }`}
+                >
+                  {s.label}{s.hours ? ` · ${s.hours}` : ''}
+                </button>
+              ))}
+            </div>
+
             {/* WEEKLY GRID */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
               {DAYS.map((day) => {
                 const daySlots = timetable
                   .filter((item) => item.day === day)
-                  .sort((a, b) => (a.time_slots?.period_number || 0) - (b.time_slots?.period_number || 0));
+                  .filter((item) => shiftFilter === 'All' || (item.time_slots?.shift || 'Morning') === shiftFilter)
+                  .sort(
+                    (a, b) =>
+                      shiftIndex(a.time_slots?.shift) - shiftIndex(b.time_slots?.shift) ||
+                      (a.time_slots?.period_number || 0) - (b.time_slots?.period_number || 0)
+                  );
 
                 return (
                   <div key={day} className="bg-[#181F24] border border-[#2A343B] rounded-lg flex flex-col">
@@ -471,14 +596,23 @@ export default function Home() {
                         {daySlots.map((slot) => (
                           <div key={slot.id} className="px-4 py-3 space-y-1">
                             <div className="flex justify-between items-baseline text-[11px] text-[#6B7378]">
-                              <span>Period {slot.time_slots?.period_number ?? '—'}</span>
-                              <span>{slot.time_slots?.start_time}–{slot.time_slots?.end_time}</span>
+                              <span>
+                                <span className="text-[#8AAEDB]">{shiftInfo(slot.time_slots?.shift).short}</span> · Period {slot.time_slots?.period_number ?? '—'}
+                              </span>
+                              <span>{fmtTime(slot.time_slots?.start_time)}–{fmtTime(slot.time_slots?.end_time)}</span>
                             </div>
                             <div className="text-sm font-semibold text-[#ECE8DE]">
                               {slot.classes?.class_name} <span className="text-[#92999E] font-normal">({slot.classes?.section})</span>
                             </div>
                             <div className="flex justify-between items-center text-xs text-[#92999E] pt-0.5">
-                              <span>{slot.teachers?.name}</span>
+                              {slot.substitute ? (
+                                <span>
+                                  <span className="line-through text-[#6B7378]">{slot.teachers?.name}</span>{' '}
+                                  <span className="text-[#C9A24B] font-medium">→ {slot.substitute.name}</span>
+                                </span>
+                              ) : (
+                                <span>{slot.teachers?.name}</span>
+                              )}
                               <span className={slot.teachers?.is_double_period ? 'text-[#6E9583]' : 'text-[#6B7378]'}>
                                 {slot.teachers?.subject}{slot.teachers?.is_double_period ? ' · double' : ''}
                               </span>
@@ -587,7 +721,7 @@ export default function Home() {
                       <p className="text-xs text-[#6B7378]">
                         {year} ({yearCourses.length})
                       </p>
-                      <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto scroll-stable">
                         {yearCourses.map((c) => (
                           <div key={c.id} className="bg-[#12181C] border border-[#2A343B] px-2.5 py-2 rounded-md text-xs">
                             {editingCourseId === c.id ? (
@@ -747,7 +881,7 @@ export default function Home() {
                   </button>
                 </form>
 
-                <div className="space-y-2 pt-2 max-h-64 overflow-y-auto">
+                <div className="space-y-2 pt-2 max-h-64 overflow-y-auto scroll-stable">
                   <p className="text-xs text-[#6B7378]">Existing teachers ({teachers.length})</p>
                   {teachers.map((t) => (
                     <div key={t.id} className="bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm space-y-2">
@@ -838,6 +972,15 @@ export default function Home() {
                       className="w-full bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B]"
                     />
                   )}
+                  <select
+                    value={newClass.shift}
+                    onChange={(e) => setNewClass({ ...newClass, shift: e.target.value })}
+                    className="w-full bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B] text-[#ECE8DE]"
+                  >
+                    {SHIFTS.map((s) => (
+                      <option key={s.value} value={s.value}>{s.label} ({s.hours})</option>
+                    ))}
+                  </select>
                   <button
                     type="submit"
                     disabled={!newClass.class_name || !newClass.section || (newClass.section === 'Other' && !newClass.customSection.trim())}
@@ -847,7 +990,7 @@ export default function Home() {
                   </button>
                 </form>
 
-                <div className="space-y-2 pt-2 max-h-64 overflow-y-auto">
+                <div className="space-y-2 pt-2 max-h-64 overflow-y-auto scroll-stable">
                   <p className="text-xs text-[#6B7378]">Existing classes ({classes.length})</p>
                   {classes.map((c) => (
                     <div key={c.id} className="bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm space-y-2">
@@ -880,6 +1023,15 @@ export default function Home() {
                               className="w-full bg-[#181F24] border border-[#2A343B] p-1.5 rounded text-xs"
                             />
                           )}
+                          <select
+                            value={editClass.shift}
+                            onChange={(e) => setEditClass({ ...editClass, shift: e.target.value })}
+                            className="w-full bg-[#181F24] border border-[#2A343B] p-1.5 rounded text-xs text-[#ECE8DE]"
+                          >
+                            {SHIFTS.map((s) => (
+                              <option key={s.value} value={s.value}>{s.label}</option>
+                            ))}
+                          </select>
                           <div className="flex gap-2">
                             <button onClick={() => handleUpdateClass(c.id)} className="bg-[#6E9583] text-[#12181C] font-medium px-2.5 py-1 rounded text-xs">Save</button>
                             <button onClick={() => setEditingClassId(null)} className="bg-[#2A343B] text-[#92999E] px-2.5 py-1 rounded text-xs">Cancel</button>
@@ -889,13 +1041,15 @@ export default function Home() {
                         <div className="flex justify-between items-center">
                           <div>
                             <p className="font-medium text-[#ECE8DE]">{c.class_name}</p>
-                            <p className="text-xs text-[#6B7378]">Section {c.section}</p>
+                            <p className="text-xs text-[#6B7378]">
+                              Section {c.section} · <span className="text-[#8AAEDB]">{shiftInfo(c.shift).label}</span>
+                            </p>
                           </div>
                           <div className="flex gap-3">
                             <button
                               onClick={() => {
                                 setEditingClassId(c.id);
-                                setEditClass({ class_name: c.class_name, section: c.section, customSection: '' });
+                                setEditClass({ class_name: c.class_name, section: c.section, customSection: '', shift: c.shift || 'Morning' });
                               }}
                               className="text-[#C9A24B] text-xs"
                             >
@@ -914,6 +1068,15 @@ export default function Home() {
               <div className="bg-[#181F24] border border-[#2A343B] rounded-lg p-5 space-y-4">
                 <h3 className="font-display text-lg font-semibold">Periods</h3>
                 <form onSubmit={handleAddSlot} className="space-y-3">
+                  <select
+                    value={newSlot.shift}
+                    onChange={(e) => setNewSlot({ ...newSlot, shift: e.target.value })}
+                    className="w-full bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B] text-[#ECE8DE]"
+                  >
+                    {SHIFTS.map((s) => (
+                      <option key={s.value} value={s.value}>{s.label} ({s.hours})</option>
+                    ))}
+                  </select>
                   <input
                     type="number"
                     placeholder="Period number, e.g. 1"
@@ -924,14 +1087,14 @@ export default function Home() {
                   <div className="flex gap-2">
                     <input
                       type="text"
-                      placeholder="Start (08:00)"
+                      placeholder="Start (09:00)"
                       value={newSlot.start_time}
                       onChange={(e) => setNewSlot({ ...newSlot, start_time: e.target.value })}
                       className="w-1/2 bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B]"
                     />
                     <input
                       type="text"
-                      placeholder="End (08:45)"
+                      placeholder="End (09:45)"
                       value={newSlot.end_time}
                       onChange={(e) => setNewSlot({ ...newSlot, end_time: e.target.value })}
                       className="w-1/2 bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B]"
@@ -950,16 +1113,34 @@ export default function Home() {
                     Add period
                   </button>
                 </form>
-                <p className="text-xs text-[#6B7378] -mt-1">
-                  Monday–Thursday: 9:00 AM–1:30 PM, six 45-min periods. Friday: 9:00 AM–12:30 PM, four periods.
-                </p>
+                <button
+                  type="button"
+                  onClick={handleSetupShifts}
+                  className="w-full border border-[#C9A24B] text-[#C9A24B] hover:bg-[#C9A24B] hover:text-[#12181C] font-medium py-2 rounded-md text-xs transition-colors"
+                >
+                  Load default shift timings
+                </button>
+                <div className="text-xs text-[#6B7378] -mt-1 space-y-0.5">
+                  <p>Morning: 9:00 AM–1:30 PM (six 45-min periods), then a 30-min break.</p>
+                  <p>2nd shift: 2:00 PM–6:00 PM · 3rd shift: 5:00 PM–9:00 PM (six 40-min periods each).</p>
+                  <p>Type times in 24-hour form (e.g. 14:00). Only shifts with no periods yet are filled in.</p>
+                </div>
 
-                <div className="space-y-2 pt-2 max-h-64 overflow-y-auto">
+                <div className="space-y-2 pt-2 max-h-64 overflow-y-auto scroll-stable">
                   <p className="text-xs text-[#6B7378]">Existing periods ({timeSlots.length})</p>
-                  {timeSlots.map((s) => (
+                  {sortedSlots.map((s) => (
                     <div key={s.id} className="bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm space-y-2">
                       {editingSlotId === s.id ? (
                         <div className="space-y-1.5">
+                          <select
+                            value={editSlot.shift}
+                            onChange={(e) => setEditSlot({ ...editSlot, shift: e.target.value })}
+                            className="w-full bg-[#181F24] border border-[#2A343B] p-1.5 rounded text-xs text-[#ECE8DE]"
+                          >
+                            {SHIFTS.map((s) => (
+                              <option key={s.value} value={s.value}>{s.label}</option>
+                            ))}
+                          </select>
                           <input
                             type="number"
                             value={editSlot.period_number}
@@ -996,9 +1177,11 @@ export default function Home() {
                       ) : (
                         <div className="flex justify-between items-center">
                           <div>
-                            <p className="font-medium text-[#ECE8DE]">Period {s.period_number}</p>
+                            <p className="font-medium text-[#ECE8DE]">
+                              <span className="text-[#8AAEDB]">{shiftInfo(s.shift).short}</span> · Period {s.period_number}
+                            </p>
                             <p className="text-xs text-[#6B7378]">
-                              {s.start_time} – {s.end_time}
+                              {fmtTime(s.start_time)} – {fmtTime(s.end_time)}
                               {s.applies_on_friday === false && <span className="text-[#C9A24B]"> · Mon–Thu only</span>}
                             </p>
                           </div>
@@ -1011,6 +1194,7 @@ export default function Home() {
                                   start_time: s.start_time,
                                   end_time: s.end_time,
                                   applies_on_friday: s.applies_on_friday !== false,
+                                  shift: s.shift || 'Morning',
                                 });
                               }}
                               className="text-[#C9A24B] text-xs"
@@ -1114,6 +1298,105 @@ export default function Home() {
               </div>
             </div>
 
+          </div>
+        )}
+
+        {activeTab === 'absence' && (
+          <div className="space-y-5">
+            <div className="bg-[#181F24] border border-[#2A343B] border-l-2 border-l-[#C9A24B] rounded-lg p-5 space-y-4">
+              <div>
+                <h3 className="font-display text-lg font-semibold">Teacher absence</h3>
+                <p className="text-[#92999E] text-sm mt-1">
+                  Mark a teacher absent for a day. Each of their periods on that day is handed to a teacher who is
+                  free at that time — same technology first, and whoever has covered the fewest periods. The original
+                  timetable is not changed: remove the absence and everything goes back.
+                </p>
+              </div>
+
+              <form onSubmit={handleMarkAbsent} className="grid grid-cols-1 md:grid-cols-[1.6fr_1fr_auto] gap-3 items-end">
+                <div>
+                  <label className="block text-xs text-[#92999E] mb-1.5">Absent teacher</label>
+                  <select
+                    value={absentForm.teacher_id}
+                    onChange={(e) => setAbsentForm({ ...absentForm, teacher_id: e.target.value })}
+                    className="w-full bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B] text-[#ECE8DE]"
+                  >
+                    <option value="">Select a teacher</option>
+                    {teachers.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name} — {t.subject}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-[#92999E] mb-1.5">Day</label>
+                  <select
+                    value={absentForm.day}
+                    onChange={(e) => setAbsentForm({ ...absentForm, day: e.target.value })}
+                    className="w-full bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B] text-[#ECE8DE]"
+                  >
+                    {DAYS.map((d) => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                    <option value="Whole week">Whole week</option>
+                  </select>
+                </div>
+                <button
+                  type="submit"
+                  disabled={!absentForm.teacher_id}
+                  className="bg-[#C9A24B] hover:bg-[#E4C77A] disabled:opacity-40 text-[#12181C] font-semibold px-5 py-2.5 rounded-md text-sm transition-colors"
+                >
+                  Mark absent &amp; auto-assign
+                </button>
+              </form>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <div className="bg-[#181F24] border border-[#2A343B] rounded-lg p-5 space-y-3">
+                <h3 className="font-display text-lg font-semibold">Current absences ({sortedAbsences.length})</h3>
+                {sortedAbsences.length === 0 ? (
+                  <p className="text-xs text-[#4A5157]">No teacher is marked absent.</p>
+                ) : (
+                  <div className="divide-y divide-[#2A343B] border border-[#2A343B] rounded-md overflow-hidden">
+                    {sortedAbsences.map((a) => (
+                      <div key={a.id} className="flex justify-between items-center bg-[#12181C] px-3 py-2.5 text-sm">
+                        <div>
+                          <span className="font-medium text-[#ECE8DE]">
+                            {teachers.find((t) => t.id === a.teacher_id)?.name || `Teacher #${a.teacher_id}`}
+                          </span>
+                          <span className="text-[#92999E]"> · {a.day}</span>
+                        </div>
+                        <button onClick={() => handleRemoveAbsence(a.id)} className="text-[#C97B5F] text-xs">
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-[#181F24] border border-[#2A343B] rounded-lg p-5 space-y-3">
+                <h3 className="font-display text-lg font-semibold">Substitutes assigned ({substitutionRows.length})</h3>
+                {substitutionRows.length === 0 ? (
+                  <p className="text-xs text-[#4A5157]">No substitutions right now.</p>
+                ) : (
+                  <div className="divide-y divide-[#2A343B] border border-[#2A343B] rounded-md overflow-hidden max-h-96 overflow-y-auto scroll-stable">
+                    {substitutionRows.map((r) => (
+                      <div key={r.id} className="bg-[#12181C] px-3 py-2.5 text-sm space-y-0.5">
+                        <p className="text-[#ECE8DE]">
+                          <span className="line-through text-[#6B7378]">{r.teachers?.name}</span>
+                          <span className="text-[#C9A24B]"> → {r.substitute?.name}</span>
+                        </p>
+                        <p className="text-xs text-[#6B7378]">
+                          {r.day} · {shiftInfo(r.time_slots?.shift).short} P{r.time_slots?.period_number} ·{' '}
+                          {fmtTime(r.time_slots?.start_time)}–{fmtTime(r.time_slots?.end_time)} ·{' '}
+                          {r.classes?.class_name}-{r.classes?.section} · {r.teachers?.subject}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         )}
 
