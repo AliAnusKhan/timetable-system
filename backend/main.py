@@ -48,6 +48,8 @@ class TeacherSchema(BaseModel):
     name: str
     subject: str
     is_double_period: Optional[bool] = False  # True if the course requires two consecutive periods (e.g. a lab)
+    shift: Optional[str] = "Morning"          # Morning / Afternoon (2nd shift) / Evening (3rd shift) - teachers
+                                               # belong to one shift and only teach classes in that same shift
 
 class ClassSchema(BaseModel):
     class_name: str
@@ -97,6 +99,12 @@ SHIFT_DEFAULTS = {
     "Evening":   {"start": "17:00", "end": "21:00", "period_minutes": 40, "friday_periods": 99},
 }
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+SHIFT_LABELS = {"Morning": "Morning shift", "Afternoon": "2nd shift", "Evening": "3rd shift"}
+
+
+def shift_info_label(value: str) -> str:
+    return SHIFT_LABELS.get(value, value or "Morning")
+
 
 
 def to_minutes(value) -> Optional[int]:
@@ -262,7 +270,12 @@ def get_all_data():
 @app.post("/add-teacher")
 def add_teacher(data: TeacherSchema):
     try:
-        payload = {"name": data.name, "subject": data.subject, "is_double_period": data.is_double_period}
+        payload = {
+            "name": data.name,
+            "subject": data.subject,
+            "is_double_period": data.is_double_period,
+            "shift": data.shift or "Morning",
+        }
         res = supabase.table("teachers").insert(payload).execute()
         return {"success": True, "data": res.data}
     except Exception as e:
@@ -271,7 +284,12 @@ def add_teacher(data: TeacherSchema):
 @app.put("/update-teacher/{teacher_id}")
 def update_teacher(teacher_id: int, data: TeacherSchema):
     try:
-        payload = {"name": data.name, "subject": data.subject, "is_double_period": data.is_double_period}
+        payload = {
+            "name": data.name,
+            "subject": data.subject,
+            "is_double_period": data.is_double_period,
+            "shift": data.shift or "Morning",
+        }
         res = supabase.table("teachers").update(payload).eq("id", teacher_id).execute()
         return {"success": True, "data": res.data}
     except Exception as e:
@@ -419,6 +437,22 @@ def delete_course(course_id: int):
 @app.post("/add-assignment")
 def add_assignment(data: CourseAssignmentSchema):
     try:
+        teacher_res = supabase.table("teachers").select("*").eq("id", data.teacher_id).execute().data
+        class_res = supabase.table("classes").select("*").eq("id", data.class_id).execute().data
+        if not teacher_res:
+            raise HTTPException(status_code=404, detail="Teacher not found.")
+        if not class_res:
+            raise HTTPException(status_code=404, detail="Class not found.")
+        teacher, cls = teacher_res[0], class_res[0]
+        if shift_of(teacher) != shift_of(cls):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{teacher['name']} is a {shift_info_label(shift_of(teacher))} teacher and can't be linked to "
+                    f"{cls['class_name']}-{cls['section']}, which is a {shift_info_label(shift_of(cls))} class. "
+                    f"Pick a teacher from the same shift, or change the teacher's shift."
+                ),
+            )
         payload = {
             "teacher_id": data.teacher_id,
             "class_id": data.class_id,
@@ -426,6 +460,8 @@ def add_assignment(data: CourseAssignmentSchema):
         }
         res = supabase.table("course_assignments").insert(payload).execute()
         return {"success": True, "data": res.data}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -463,6 +499,15 @@ def assign_slot(data: AssignSlotSchema):
         for e in existing:
             if e["time_slot_id"] in slot_map:
                 tracker.book(e["day"], e["teacher_id"], e["class_id"], slot_map[e["time_slot_id"]])
+
+        if shift_of(teacher) != shift_of(cls):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{teacher['name']} is a {shift_info_label(shift_of(teacher))} teacher and can't teach "
+                    f"{cls['class_name']}-{cls['section']}, which is a {shift_info_label(shift_of(cls))} class."
+                ),
+            )
 
         days_to_try = [data.day] if data.day else DAYS
         is_double = teacher.get("is_double_period", False)
@@ -538,6 +583,13 @@ def generate_timetable():
             sessions_needed = a.get("sessions_per_week") or 5
             is_double = teacher.get("is_double_period", False)
             shift = shift_of(cls)
+
+            if shift_of(teacher) != shift:
+                shortfalls.append(
+                    f"{teacher['name']} ({shift_info_label(shift_of(teacher))}) -> {cls['class_name']}-{cls['section']} "
+                    f"({shift_info_label(shift)}): shifts don't match, skipped - fix this Course Assignment"
+                )
+                continue
 
             if not any(shift_of(s) == shift for s in time_slots):
                 shortfalls.append(
@@ -617,6 +669,22 @@ def fetch_timetable_merged() -> list:
     return rows
 
 
+@app.delete("/clear-timetable")
+def clear_timetable():
+    """Wipes the generated/manual timetable (and any substitutions riding on it). Teachers,
+    classes, courses, periods and absence records are left untouched, so it can be regenerated
+    or rebuilt from scratch."""
+    try:
+        try:
+            supabase.table("substitutions").delete().gt("id", 0).execute()
+        except Exception:
+            pass  # migration.sql not run yet - nothing to clean up there
+        supabase.table("timetable").delete().gt("id", 0).execute()
+        return {"success": True, "message": "Timetable cleared. Course assignments and periods were kept."}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/get-timetable")
 def get_timetable():
     try:
@@ -680,7 +748,12 @@ def apply_substitutions(day: str) -> dict:
         orig = teacher_by_id.get(e["teacher_id"], {})
         where = f"{day}, {cls.get('class_name', '?')}-{cls.get('section', '?')}, {shift_of(slot)} shift P{slot.get('period_number')}"
 
-        candidates = [t for t in teachers if t["id"] not in absent_ids and tracker.teacher_free(day, t["id"], slot)]
+        candidates = [
+            t for t in teachers
+            if t["id"] not in absent_ids
+            and shift_of(t) == shift_of(cls)
+            and tracker.teacher_free(day, t["id"], slot)
+        ]
         if not candidates:
             unresolved.append(f"{orig.get('name', '?')} ({where}): no free teacher available")
             continue

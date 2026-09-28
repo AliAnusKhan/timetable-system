@@ -137,7 +137,6 @@ export default function Home() {
   const [courses, setCourses] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [absences, setAbsences] = useState([]);
-  const [shiftFilter, setShiftFilter] = useState('All');
   const [absentForm, setAbsentForm] = useState({ teacher_id: '', day: DAYS[0] });
 
   // Form inputs
@@ -146,6 +145,7 @@ export default function Home() {
   const [newTeacherTechnology, setNewTeacherTechnology] = useState('');
   const [newTeacherCourseId, setNewTeacherCourseId] = useState('');
   const [newTeacherDouble, setNewTeacherDouble] = useState(false);
+  const [newTeacherShift, setNewTeacherShift] = useState('Morning');
 
   const [newClass, setNewClass] = useState({ class_name: '', section: '', customSection: '', shift: 'Morning' });
   const [newSlot, setNewSlot] = useState({ period_number: '', start_time: '', end_time: '', applies_on_friday: true, shift: 'Morning' });
@@ -155,7 +155,7 @@ export default function Home() {
 
   // Edit mode
   const [editingTeacherId, setEditingTeacherId] = useState(null);
-  const [editTeacher, setEditTeacher] = useState({ name: '', subject: '', is_double_period: false });
+  const [editTeacher, setEditTeacher] = useState({ name: '', subject: '', is_double_period: false, shift: 'Morning' });
   const [editingCourseId, setEditingCourseId] = useState(null);
   const [editCourse, setEditCourse] = useState({ year: '1st Year', technology: TECHNOLOGIES[0], name: '', course_type: 'Theory' });
   const [editingClassId, setEditingClassId] = useState(null);
@@ -187,6 +187,24 @@ export default function Home() {
   useEffect(() => {
     loadAllData();
   }, []);
+
+  const handleClearTimetable = async () => {
+    if (!window.confirm('Clear the whole timetable? Course assignments and periods will be kept, so you can regenerate any time.')) {
+      return;
+    }
+    setLoading(true);
+    setMessage('');
+    try {
+      const res = await fetch('/api/clear-timetable', { method: 'DELETE' });
+      const data = await res.json();
+      setMessage(res.ok && data.success ? data.message : data.detail || 'Could not clear the timetable.');
+      loadAllData();
+    } catch (err) {
+      setMessage('Server error. Please make sure the FastAPI server is running.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleGenerate = async () => {
     setLoading(true);
@@ -281,6 +299,7 @@ export default function Home() {
         name: newTeacherName,
         subject: `${selectedCourse.name} (${newTeacherTechnology} · ${newTeacherYear})`,
         is_double_period: newTeacherDouble,
+        shift: newTeacherShift,
       }),
     });
     setNewTeacherName('');
@@ -288,6 +307,7 @@ export default function Home() {
     setNewTeacherTechnology('');
     setNewTeacherCourseId('');
     setNewTeacherDouble(false);
+    setNewTeacherShift('Morning');
     loadAllData();
   };
 
@@ -411,7 +431,7 @@ export default function Home() {
   const handleAddAssignment = async (e) => {
     e.preventDefault();
     if (!newAssignment.teacher_id || !newAssignment.class_id) return;
-    await fetch('/api/add-assignment', {
+    const res = await fetch('/api/add-assignment', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -420,9 +440,26 @@ export default function Home() {
         sessions_per_week: parseInt(newAssignment.sessions_per_week) || 5,
       }),
     });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      setMessage(data.detail || 'Could not add the assignment.');
+      return;
+    }
     setNewAssignment({ teacher_id: '', class_id: '', sessions_per_week: 5 });
     loadAllData();
   };
+
+  const assignmentTeacherOptions = useMemo(() => {
+    if (!newAssignment.class_id) return teachers;
+    const cls = classes.find((c) => String(c.id) === String(newAssignment.class_id));
+    return cls ? teachers.filter((t) => (t.shift || 'Morning') === (cls.shift || 'Morning')) : teachers;
+  }, [teachers, classes, newAssignment.class_id]);
+
+  const assignmentClassOptions = useMemo(() => {
+    if (!newAssignment.teacher_id) return classes;
+    const t = teachers.find((x) => String(x.id) === String(newAssignment.teacher_id));
+    return t ? classes.filter((c) => (c.shift || 'Morning') === (t.shift || 'Morning')) : classes;
+  }, [teachers, classes, newAssignment.teacher_id]);
 
   const handleDeleteAssignment = async (id) => {
     await fetch(`/api/delete-assignment/${id}`, { method: 'DELETE' });
@@ -498,13 +535,22 @@ export default function Home() {
               Add a teacher and their course once, link it to a class — the engine spreads it across Monday–Friday.
             </p>
           </div>
-          <button
-            onClick={handleGenerate}
-            disabled={loading}
-            className="shrink-0 bg-[#C9A24B] hover:bg-[#E4C77A] disabled:opacity-40 text-[#12181C] font-semibold px-5 py-2.5 rounded-md text-sm transition-colors"
-          >
-            {loading ? 'Distributing…' : 'Auto-distribute Mon–Fri'}
-          </button>
+          <div className="flex gap-2 shrink-0">
+            <button
+              onClick={handleClearTimetable}
+              disabled={loading || timetable.length === 0}
+              className="bg-transparent border border-[#C97B5F] text-[#C97B5F] hover:bg-[#C97B5F] hover:text-[#12181C] disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#C97B5F] font-semibold px-4 py-2.5 rounded-md text-sm transition-colors"
+            >
+              Clear timetable
+            </button>
+            <button
+              onClick={handleGenerate}
+              disabled={loading}
+              className="bg-[#C9A24B] hover:bg-[#E4C77A] disabled:opacity-40 text-[#12181C] font-semibold px-5 py-2.5 rounded-md text-sm transition-colors"
+            >
+              {loading ? 'Distributing…' : 'Auto-distribute Mon–Fri'}
+            </button>
+          </div>
         </header>
 
         {/* Tabs */}
@@ -538,7 +584,7 @@ export default function Home() {
         )}
 
         {activeTab === 'grid' && (
-          <div className="space-y-6">
+          <div className="space-y-10">
             {assignments.length === 0 && (
               <div className="bg-[#181F24] border border-[#2A343B] border-l-2 border-l-[#C9A24B] rounded-lg p-5 text-sm text-[#92999E]">
                 There are no course assignments yet. Go to the{' '}
@@ -547,84 +593,78 @@ export default function Home() {
               </div>
             )}
 
-            {/* SHIFT FILTER */}
-            <div className="flex flex-wrap items-center gap-2">
-              {[{ value: 'All', label: 'All shifts', hours: '' }, ...SHIFTS].map((s) => (
-                <button
-                  key={s.value}
-                  onClick={() => setShiftFilter(s.value)}
-                  className={`px-3 py-1.5 rounded-md text-xs border ${
-                    shiftFilter === s.value
-                      ? 'bg-[#C9A24B] text-[#12181C] border-[#C9A24B] font-semibold'
-                      : 'bg-[#181F24] text-[#92999E] border-[#2A343B]'
-                  }`}
-                >
-                  {s.label}{s.hours ? ` · ${s.hours}` : ''}
-                </button>
-              ))}
-            </div>
+            {/* ONE WEEKLY GRID PER SHIFT — each shift's teachers and classes are separate,
+                so each shift gets its own Monday–Friday board. */}
+            {SHIFTS.map((shift) => {
+              const shiftSlots = timetable.filter((item) => (item.time_slots?.shift || 'Morning') === shift.value);
 
-            {/* WEEKLY GRID */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-              {DAYS.map((day) => {
-                const daySlots = timetable
-                  .filter((item) => item.day === day)
-                  .filter((item) => shiftFilter === 'All' || (item.time_slots?.shift || 'Morning') === shiftFilter)
-                  .sort(
-                    (a, b) =>
-                      shiftIndex(a.time_slots?.shift) - shiftIndex(b.time_slots?.shift) ||
-                      (a.time_slots?.period_number || 0) - (b.time_slots?.period_number || 0)
-                  );
-
-                return (
-                  <div key={day} className="bg-[#181F24] border border-[#2A343B] rounded-lg flex flex-col">
-                    <div className="flex justify-between items-center px-4 py-3 border-b border-[#2A343B]">
-                      <h2 className="font-display text-base font-semibold">
-                        {day}
-                      </h2>
-                      <span className="text-[11px] text-[#6B7378]">
-                        {daySlots.length} {daySlots.length === 1 ? 'period' : 'periods'}
-                      </span>
-                    </div>
-
-                    {daySlots.length === 0 ? (
-                      <div className="flex-1 flex items-center justify-center min-h-[140px]">
-                        <p className="text-[#4A5157] text-xs">Nothing scheduled yet</p>
-                      </div>
-                    ) : (
-                      <div className="flex-1 divide-y divide-[#2A343B]">
-                        {daySlots.map((slot) => (
-                          <div key={slot.id} className="px-4 py-3 space-y-1">
-                            <div className="flex justify-between items-baseline text-[11px] text-[#6B7378]">
-                              <span>
-                                <span className="text-[#8AAEDB]">{shiftInfo(slot.time_slots?.shift).short}</span> · Period {slot.time_slots?.period_number ?? '—'}
-                              </span>
-                              <span>{fmtTime(slot.time_slots?.start_time)}–{fmtTime(slot.time_slots?.end_time)}</span>
-                            </div>
-                            <div className="text-sm font-semibold text-[#ECE8DE]">
-                              {slot.classes?.class_name} <span className="text-[#92999E] font-normal">({slot.classes?.section})</span>
-                            </div>
-                            <div className="flex justify-between items-center text-xs text-[#92999E] pt-0.5">
-                              {slot.substitute ? (
-                                <span>
-                                  <span className="line-through text-[#6B7378]">{slot.teachers?.name}</span>{' '}
-                                  <span className="text-[#C9A24B] font-medium">→ {slot.substitute.name}</span>
-                                </span>
-                              ) : (
-                                <span>{slot.teachers?.name}</span>
-                              )}
-                              <span className={slot.teachers?.is_double_period ? 'text-[#6E9583]' : 'text-[#6B7378]'}>
-                                {slot.teachers?.subject}{slot.teachers?.is_double_period ? ' · double' : ''}
-                              </span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+              return (
+                <div key={shift.value} className="space-y-4">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-[#2A343B] pb-2">
+                    <h2 className="font-display text-xl font-semibold text-[#ECE8DE]">
+                      {shift.label} <span className="text-[#6B7378] text-sm font-normal">· {shift.hours}</span>
+                    </h2>
+                    <span className="text-[11px] text-[#6B7378]">
+                      {shiftSlots.length} {shiftSlots.length === 1 ? 'period' : 'periods'} scheduled this week
+                    </span>
                   </div>
-                );
-              })}
-            </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+                    {DAYS.map((day) => {
+                      const daySlots = shiftSlots
+                        .filter((item) => item.day === day)
+                        .sort((a, b) => (a.time_slots?.period_number || 0) - (b.time_slots?.period_number || 0));
+
+                      return (
+                        <div key={day} className="bg-[#181F24] border border-[#2A343B] rounded-lg flex flex-col">
+                          <div className="flex justify-between items-center px-4 py-3 border-b border-[#2A343B]">
+                            <h3 className="font-display text-base font-semibold">
+                              {day}
+                            </h3>
+                            <span className="text-[11px] text-[#6B7378]">
+                              {daySlots.length} {daySlots.length === 1 ? 'period' : 'periods'}
+                            </span>
+                          </div>
+
+                          {daySlots.length === 0 ? (
+                            <div className="flex-1 flex items-center justify-center min-h-[140px]">
+                              <p className="text-[#4A5157] text-xs">Nothing scheduled yet</p>
+                            </div>
+                          ) : (
+                            <div className="flex-1 divide-y divide-[#2A343B]">
+                              {daySlots.map((slot) => (
+                                <div key={slot.id} className="px-4 py-3 space-y-1">
+                                  <div className="flex justify-between items-baseline text-[11px] text-[#6B7378]">
+                                    <span>Period {slot.time_slots?.period_number ?? '—'}</span>
+                                    <span>{fmtTime(slot.time_slots?.start_time)}–{fmtTime(slot.time_slots?.end_time)}</span>
+                                  </div>
+                                  <div className="text-sm font-semibold text-[#ECE8DE]">
+                                    {slot.classes?.class_name} <span className="text-[#92999E] font-normal">({slot.classes?.section})</span>
+                                  </div>
+                                  <div className="flex justify-between items-center text-xs text-[#92999E] pt-0.5">
+                                    {slot.substitute ? (
+                                      <span>
+                                        <span className="line-through text-[#6B7378]">{slot.teachers?.name}</span>{' '}
+                                        <span className="text-[#C9A24B] font-medium">→ {slot.substitute.name}</span>
+                                      </span>
+                                    ) : (
+                                      <span>{slot.teachers?.name}</span>
+                                    )}
+                                    <span className={slot.teachers?.is_double_period ? 'text-[#6E9583]' : 'text-[#6B7378]'}>
+                                      {slot.teachers?.subject}{slot.teachers?.is_double_period ? ' · double' : ''}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -863,6 +903,21 @@ export default function Home() {
                       No courses for {newTeacherTechnology} · {newTeacherYear} yet — add one in the Course catalog above first.
                     </p>
                   )}
+                  <div>
+                    <label className="block text-xs text-[#92999E] mb-1.5">Shift</label>
+                    <select
+                      value={newTeacherShift}
+                      onChange={(e) => setNewTeacherShift(e.target.value)}
+                      className="w-full bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B] text-[#ECE8DE]"
+                    >
+                      {SHIFTS.map((s) => (
+                        <option key={s.value} value={s.value}>{s.label} ({s.hours})</option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-[#4A5157] mt-1">
+                      This teacher can only be linked to classes in the same shift.
+                    </p>
+                  </div>
                   <label className="flex items-center gap-2 cursor-pointer pt-1 text-xs text-[#92999E]">
                     <input
                       type="checkbox"
@@ -899,6 +954,15 @@ export default function Home() {
                             onChange={(e) => setEditTeacher({ ...editTeacher, subject: e.target.value })}
                             className="w-full bg-[#181F24] border border-[#2A343B] p-1.5 rounded text-xs"
                           />
+                          <select
+                            value={editTeacher.shift}
+                            onChange={(e) => setEditTeacher({ ...editTeacher, shift: e.target.value })}
+                            className="w-full bg-[#181F24] border border-[#2A343B] p-1.5 rounded text-xs text-[#ECE8DE]"
+                          >
+                            {SHIFTS.map((s) => (
+                              <option key={s.value} value={s.value}>{s.label}</option>
+                            ))}
+                          </select>
                           <label className="flex items-center gap-2 text-xs text-[#92999E]">
                             <input
                               type="checkbox"
@@ -917,14 +981,14 @@ export default function Home() {
                           <div>
                             <p className="font-medium text-[#ECE8DE]">{t.name}</p>
                             <p className="text-xs text-[#6B7378]">
-                              {t.subject}{t.is_double_period ? ' · double period' : ''}
+                              <span className="text-[#8AAEDB]">{shiftInfo(t.shift).short}</span> · {t.subject}{t.is_double_period ? ' · double period' : ''}
                             </p>
                           </div>
                           <div className="flex gap-3">
                             <button
                               onClick={() => {
                                 setEditingTeacherId(t.id);
-                                setEditTeacher({ name: t.name, subject: t.subject, is_double_period: t.is_double_period });
+                                setEditTeacher({ name: t.name, subject: t.subject, is_double_period: t.is_double_period, shift: t.shift || 'Morning' });
                               }}
                               className="text-[#C9A24B] text-xs"
                             >
@@ -1231,10 +1295,13 @@ export default function Home() {
                     className="w-full bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B] text-[#ECE8DE]"
                   >
                     <option value="">Select a teacher</option>
-                    {teachers.map((t) => (
-                      <option key={t.id} value={t.id}>{t.name} — {t.subject}</option>
+                    {assignmentTeacherOptions.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name} — {t.subject} · {shiftInfo(t.shift).short}</option>
                     ))}
                   </select>
+                  {newAssignment.class_id && assignmentTeacherOptions.length === 0 && (
+                    <p className="text-[11px] text-[#C97B5F] mt-1">No teachers in this class's shift yet.</p>
+                  )}
                 </div>
 
                 <div>
@@ -1245,10 +1312,13 @@ export default function Home() {
                     className="w-full bg-[#12181C] border border-[#2A343B] p-2.5 rounded-md text-sm outline-none focus:border-[#C9A24B] text-[#ECE8DE]"
                   >
                     <option value="">Select a class</option>
-                    {classes.map((c) => (
-                      <option key={c.id} value={c.id}>{c.class_name} — {c.section}</option>
+                    {assignmentClassOptions.map((c) => (
+                      <option key={c.id} value={c.id}>{c.class_name} — {c.section} · {shiftInfo(c.shift).short}</option>
                     ))}
                   </select>
+                  {newAssignment.teacher_id && assignmentClassOptions.length === 0 && (
+                    <p className="text-[11px] text-[#C97B5F] mt-1">No classes in this teacher's shift yet.</p>
+                  )}
                 </div>
 
                 <div>
